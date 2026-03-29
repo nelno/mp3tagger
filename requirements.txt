@@ -1,0 +1,2 @@
+# requirements.txt
+mutagen>=1.47.0r

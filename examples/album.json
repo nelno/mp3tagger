@@ -1,0 +1,8 @@
+{
+  "album": "My Awesome Album",
+  "albumartist": "Your Artist Name",
+  "totaltracks": 12,
+  "date": "2026",
+  "genre": "Synthwave",
+  "albumart": "cover.jpg"          // relative to either --albumart path or --albumtags file
+}
