@@ -38,15 +38,20 @@ def load_json_file(file_path: str) -> Dict[str, Any]:
 
 
 def find_song_tags_file(mp3_path: str) -> Optional[str]:
-    """Auto-detect song-specific tags JSON file."""
+    """Auto-detect song-specific tags JSON file.
+    Checks for: <stem>.json, mp3tags_<stem>.json, or mp3tags.json (folder-wide fallback)"""
     mp3_path = Path(mp3_path)
     folder = mp3_path.parent
     stem = mp3_path.stem
 
-    # Possible tag file names
+    # Priority order:
+    # 1. Specific per-file: songname.json
+    # 2. Specific per-file: mp3tags_songname.json
+    # 3. Folder-wide: mp3tags.json (for multiple versions of the same song)
     candidates = [
         folder / f"{stem}.json",
-        folder / f"mp3tags_{stem}.json"
+        folder / f"mp3tags_{stem}.json",
+        folder / "mp3tags.json"
     ]
 
     for candidate in candidates:
@@ -177,6 +182,7 @@ def main():
     if input_path.is_file() and str(input_path).lower().endswith(".mp3"):
         mp3_files = [str(input_path)]
     elif input_path.is_dir():
+        # RECURSIVE search for all .mp3 files in the directory and subdirectories
         mp3_files = [str(f) for f in input_path.rglob("*.mp3") if f.is_file()]
         if not mp3_files:
             print("No .mp3 files found in the directory.", file=sys.stderr)
