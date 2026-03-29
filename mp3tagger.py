@@ -2,7 +2,7 @@
 """
 MP3 Tagger for Album / Author / Song-specific metadata
 Supports single MP3 or a directory of MP3s.
-Per-song tags file detection in recursive mode (<song file name>.json or mp3tags_<song file name>.json)
+Per-song or folder-wide tags file detection.
 """
 
 import argparse
@@ -19,7 +19,7 @@ from mutagen.easyid3 import EasyID3
 
 # Versioning constants
 VERSION_HIGH = 1
-VERSION_LOW = 1
+VERSION_LOW = 3
 
 def load_json_file(file_path: str) -> Dict[str, Any]:
     """Load and parse a JSON file. Returns empty dict if file doesn't exist or fails."""
@@ -37,17 +37,13 @@ def load_json_file(file_path: str) -> Dict[str, Any]:
         return {}
 
 
-def find_song_tags_file(mp3_path: str) -> Optional[str]:
-    """Auto-detect song-specific tags JSON file.
-    Checks for: <stem>.json, mp3tags_<stem>.json, or mp3tags.json (folder-wide fallback)"""
+def find_tags_file(mp3_path: str) -> Optional[str]:
+    """Auto-detect tags JSON file (per-song or folder-wide)."""
     mp3_path = Path(mp3_path)
     folder = mp3_path.parent
     stem = mp3_path.stem
 
-    # Priority order:
-    # 1. Specific per-file: songname.json
-    # 2. Specific per-file: mp3tags_songname.json
-    # 3. Folder-wide: mp3tags.json (for multiple versions of the same song)
+    # Priority: songname.json → mp3tags_songname.json → mp3tags.json (folder-wide)
     candidates = [
         folder / f"{stem}.json",
         folder / f"mp3tags_{stem}.json",
@@ -56,7 +52,7 @@ def find_song_tags_file(mp3_path: str) -> Optional[str]:
 
     for candidate in candidates:
         if candidate.is_file():
-            print(f"Found song tags file: {candidate.name}")
+            print(f"Found tags file: {candidate.name}")
             return str(candidate)
     return None
 
@@ -67,13 +63,9 @@ def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_
         return None
 
     art_rel = album_tags["albumart"]
-
-    if albumart_dir:
-        base = Path(albumart_dir)
-    else:
-        base = Path(tags_file_dir)
-
+    base = Path(albumart_dir) if albumart_dir else Path(tags_file_dir)
     art_path = base / art_rel
+
     if art_path.is_file():
         return str(art_path)
     else:
@@ -118,7 +110,7 @@ def set_tags_on_file(mp3_path: str,
             track_num = song_tags.get("tracknumber") or "1"
             audio["tracknumber"] = f"{track_num}/{total_tracks}"
 
-        # Song-specific tags (override previous)
+        # Song-specific / file-specific tags (override)
         for key, value in song_tags.items():
             if value:
                 if key == "tracknumber" and total_tracks:
@@ -141,51 +133,49 @@ def set_tags_on_file(mp3_path: str,
                 APIC(
                     encoding=3,
                     mime=mime,
-                    type=3,  # Cover front
+                    type=3,
                     desc="Cover",
                     data=img_data
                 )
             )
 
         audio.save()
-        print(f"✓ Tagged: {Path(mp3_path).name}")
+        return True
 
     except Exception as e:
         print(f"✗ Error tagging {Path(mp3_path).name}: {e}", file=sys.stderr)
+        return False
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MP3 Batch Tagger with smart per-song JSON detection")
+    parser = argparse.ArgumentParser(description="MP3 Batch Tagger")
     parser.add_argument("--input", required=True, help="Single .mp3 file or directory containing .mp3 files")
-    parser.add_argument("--albumart", help="Directory containing album artwork (absolute)")
+    parser.add_argument("--albumart", help="Directory containing album artwork")
     parser.add_argument("--albumtags", required=True, help="Path to album-level JSON tags file")
     parser.add_argument("--tags", help="Path to song-level JSON tags file (optional - auto-detected if omitted)")
     parser.add_argument("--author", required=True, help="Path to author JSON file")
+    parser.add_argument("--verbose", action="store_true", help="Show messages for files without tags file")
 
     args = parser.parse_args()
 
-    # Load fixed JSON files
+    # Load base JSON files
     author_tags = load_json_file(args.author)
     album_tags = load_json_file(args.albumtags)
 
     albumart_dir = args.albumart
     album_tags_dir = str(Path(args.albumtags).parent)
 
-    # Resolve album art once
     album_art_path = get_album_art_path(album_tags, albumart_dir, album_tags_dir)
     total_tracks = album_tags.get("totaltracks") or album_tags.get("tracktotal") or album_tags.get("number_of_tracks")
 
-    # Determine input files
+    # Find MP3 files
     input_path = Path(args.input)
-    mp3_files = []
-
     if input_path.is_file() and str(input_path).lower().endswith(".mp3"):
         mp3_files = [str(input_path)]
     elif input_path.is_dir():
-        # RECURSIVE search for all .mp3 files in the directory and subdirectories
         mp3_files = [str(f) for f in input_path.rglob("*.mp3") if f.is_file()]
         if not mp3_files:
-            print("No .mp3 files found in the directory.", file=sys.stderr)
+            print("No .mp3 files found.", file=sys.stderr)
             sys.exit(1)
     else:
         print("Error: --input must be a valid .mp3 file or directory.", file=sys.stderr)
@@ -193,33 +183,55 @@ def main():
 
     print(f"Found {len(mp3_files)} MP3 file(s) to tag.\n")
 
-    # Process each file
-    for mp3_file in mp3_files:
-        # Determine song tags file
-        if args.tags:
-            song_tags = load_json_file(args.tags)
-            print(f"Using provided song tags file: {Path(args.tags).name}")
-        else:
-            song_tags_path = find_song_tags_file(mp3_file)
-            song_tags = load_json_file(song_tags_path) if song_tags_path else {}
+    success_count = 0
+    skipped_count = 0
 
-        # Auto-detect track number from filename if not in JSON
+    for mp3_file in mp3_files:
+        mp3_name = Path(mp3_file).name
+        tags_used = False
+        song_tags = {}
+
+        if args.tags:
+            # User explicitly provided a tags file
+            song_tags = load_json_file(args.tags)
+            print(f"Using provided tags file: {Path(args.tags).name}")
+            tags_used = True
+        else:
+            # Auto-detect
+            tags_path = find_tags_file(mp3_file)
+            if tags_path:
+                song_tags = load_json_file(tags_path)
+                tags_used = True
+            elif args.verbose:
+                print(f"No tags file found for {mp3_name}")
+
+        # Auto-detect track number from filename if missing
         if "tracknumber" not in song_tags:
             filename = Path(mp3_file).stem
             match = re.search(r'^0*(\d+)', filename)
             if match:
                 song_tags["tracknumber"] = match.group(1)
 
-        set_tags_on_file(
-            mp3_path=mp3_file,
-            author_tags=author_tags,
-            album_tags=album_tags,
-            song_tags=song_tags,
-            albumart_path=album_art_path,
-            total_tracks=total_tracks
-        )
+        # Only mark as "Tagged" if we actually found and used a tags file
+        if tags_used:
+            if set_tags_on_file(
+                mp3_path=mp3_file,
+                author_tags=author_tags,
+                album_tags=album_tags,
+                song_tags=song_tags,
+                albumart_path=album_art_path,
+                total_tracks=total_tracks
+            ):
+                print(f"✓ Tagged: {mp3_name}")
+                success_count += 1
+            # else: error already printed inside set_tags_on_file
+        else:
+            print(f"– Skipped: {mp3_name} (no tags file found)")
+            skipped_count += 1
 
-    print("\nTagging complete!")
+    print(f"\nTagging complete! Successfully tagged {success_count} file(s).")
+    if skipped_count:
+        print(f"Skipped {skipped_count} file(s) due to missing tags files.")
 
 
 if __name__ == "__main__":
