@@ -17,6 +17,9 @@ from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC, error
 from mutagen.easyid3 import EasyID3
 
+# Versioning constants
+VERSION_HIGH = 1
+VERSION_LOW = 1
 
 def load_json_file(file_path: str) -> Dict[str, Any]:
     """Load and parse a JSON file. Returns empty dict if file doesn't exist or fails."""
@@ -214,4 +217,5 @@ def main():
 
 
 if __name__ == "__main__":
+    print(f"mp3tagger v{VERSION_HIGH}.{VERSION_LOW}")
     main()
