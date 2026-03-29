@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-MP3 Tagger for Album / Author / Song-specific metadata
+MP3 Tagger for Album
+Jonathan E. Wright
 Supports single MP3 or a directory of MP3s.
-Enhanced albumtags auto-detection with case-insensitive album name matching.
 """
 
 import argparse
@@ -11,15 +11,15 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, APIC, error
+from mutagen.id3 import ID3, APIC, error as ID3Error
 from mutagen.easyid3 import EasyID3
 
 # Versioning constants
 VERSION_HIGH = 1
-VERSION_LOW = 6
+VERSION_LOW = 10
 
 def load_json_file(file_path: str) -> Dict[str, Any]:
     """Load and parse a JSON file. Returns empty dict if file doesn't exist or fails."""
@@ -38,105 +38,121 @@ def load_json_file(file_path: str) -> Dict[str, Any]:
 
 
 def sanitize_filename(name: str) -> str:
-    """Convert album name to safe filename part."""
+    """Convert name to safe filename part (for album name)."""
     if not name:
         return ""
-    # Remove unsafe characters and replace spaces with underscores
     return re.sub(r'[^a-zA-Z0-9\s\-_]', '', name).strip().replace(' ', '_')
 
 
+def find_files_case_insensitive(directory: Path, patterns: List[str]) -> Optional[Path]:
+    """Find a file in directory matching any pattern case-insensitively."""
+    if not directory.is_dir():
+        return None
+    try:
+        for file in directory.iterdir():
+            if not file.is_file():
+                continue
+            fname_lower = file.name.lower()
+            for pattern in patterns:
+                pattern_lower = pattern.lower()
+                if "*" in pattern:
+                    base = pattern_lower.replace("*", "")
+                    if base in fname_lower and fname_lower.endswith(".json"):
+                        return file
+                elif fname_lower == pattern_lower or fname_lower.endswith(pattern_lower):
+                    return file
+    except Exception:
+        pass
+    return None
+
+
+def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_dir: str) -> Optional[str]:
+    """Resolve album artwork path. Supports extension-less names (tries jpg/jpeg/png)."""
+    if not album_tags.get("albumart"):
+        return None
+
+    art_rel = album_tags["albumart"].strip()
+    base = Path(albumart_dir) if albumart_dir else Path(tags_file_dir)
+
+    # If it already has an extension, use it directly
+    if Path(art_rel).suffix:
+        art_path = base / art_rel
+        if art_path.is_file():
+            return str(art_path)
+        else:
+            print(f"Warning: Album art not found at {art_path}", file=sys.stderr)
+            return None
+
+    # No extension → try .jpg, .jpeg, .png (in that order)
+    for ext in [".jpg", ".jpeg", ".png"]:
+        art_path = base / f"{art_rel}{ext}"
+        if art_path.is_file():
+            print(f"Found album art: {art_path.name}")
+            return str(art_path)
+
+    print(f"Warning: Album art not found for '{art_rel}' (tried .jpg, .jpeg, .png)", file=sys.stderr)
+    return None
+
+
 def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any]) -> Optional[str]:
-    """Advanced auto-detection for albumtags.json with case-insensitive album name support."""
+    """Advanced case-insensitive auto-detection for albumtags files."""
     mp3_path = Path(mp3_path)
     mp3_folder = mp3_path.parent
     parent_folder = mp3_folder.parent
     parent_name = mp3_folder.name
 
-    # Get album name from song tags if available
     album_name = song_tags.get("album") or song_tags.get("albumtitle")
+    candidates: List[Path] = []
 
-    candidates = []
-
-    # Priority 1 & 2: albumtags_<album name>.json (case-insensitive variations)
     if album_name:
         base_name = sanitize_filename(album_name)
         if base_name:
-            album_variations = [
-                base_name,
-                base_name.lower(),
-                base_name.title(),
-                base_name.upper(),
-            ]
-            for var in set(album_variations):  # remove duplicates
+            variations = [base_name, base_name.lower(), base_name.title(), base_name.upper()]
+            for var in set(variations):
                 candidates.extend([
-                    mp3_folder / f"albumtags_{var}.json",      # MP3 folder
-                    parent_folder / f"albumtags_{var}.json",   # Parent folder
+                    mp3_folder / f"albumtags_{var}.json",
+                    parent_folder / f"albumtags_{var}.json",
                 ])
 
-    # Priority 3: albumtags_<parent folder name>.json in parent folder
     candidates.append(parent_folder / f"albumtags_{parent_name}.json")
-
-    # Priority 4: albumtags.json in parent folder
     candidates.append(parent_folder / "albumtags.json")
-
-    # Priority 5: albumtags.json in MP3 folder
     candidates.append(mp3_folder / "albumtags.json")
 
-    # Check candidates (this part is case-sensitive on filesystem, but we generated variations)
-    for candidate in candidates:
-        if candidate.is_file():
-            print(f"Found album tags file: {candidate.name}")
-            return str(candidate)
+    for cand in candidates:
+        if cand.is_file():
+            print(f"Found album tags file: {cand.name}")
+            return str(cand)
 
-    # Extra safety: case-insensitive search in both folders for any albumtags_*.json
-    # This catches cases where album name cleaning didn't perfectly match
-    for folder in [mp3_folder, parent_folder]:
-        try:
-            for file in folder.iterdir():
-                if file.is_file() and file.name.lower().startswith("albumtags_") and file.suffix.lower() == ".json":
-                    # Try to match against our album name (case-insensitive)
-                    if album_name and album_name.lower() in file.name.lower():
-                        print(f"Found album tags file (case-insensitive match): {file.name}")
-                        return str(file)
-        except Exception:
-            pass
+    # Broader case-insensitive fallback
+    if album_name:
+        album_lower = album_name.lower()
+        for folder in [mp3_folder, parent_folder]:
+            result = find_files_case_insensitive(folder, [f"albumtags_{album_lower}*.json", "albumtags_*.json"])
+            if result:
+                print(f"Found album tags file (case-insensitive): {result.name}")
+                return str(result)
+
+    for folder in [parent_folder, mp3_folder]:
+        result = find_files_case_insensitive(folder, ["albumtags.json", "albumtags_*.json"])
+        if result:
+            print(f"Found album tags file (case-insensitive): {result.name}")
+            return str(result)
 
     return None
 
 
 def find_tags_file(mp3_path: str) -> Optional[str]:
-    """Auto-detect song-level tags JSON file (per-song or folder-wide)."""
+    """Auto-detect song-level tags file case-insensitively."""
     mp3_path = Path(mp3_path)
     folder = mp3_path.parent
     stem = mp3_path.stem
 
-    candidates = [
-        folder / f"{stem}.json",
-        folder / f"mp3tags_{stem}.json",
-        folder / "mp3tags.json"
-    ]
-
-    for candidate in candidates:
-        if candidate.is_file():
-            print(f"Found song tags file: {candidate.name}")
-            return str(candidate)
+    patterns = [f"{stem}.json", f"mp3tags_{stem}.json", "mp3tags.json"]
+    result = find_files_case_insensitive(folder, patterns)
+    if result:
+        print(f"Found song tags file: {result.name}")
+        return str(result)
     return None
-
-
-def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_dir: str) -> Optional[str]:
-    """Resolve album artwork path."""
-    if not album_tags.get("albumart"):
-        return None
-
-    art_rel = album_tags["albumart"]
-    base = Path(albumart_dir) if albumart_dir else Path(tags_file_dir)
-    art_path = base / art_rel
-
-    if art_path.is_file():
-        return str(art_path)
-    else:
-        print(f"Warning: Album art not found at {art_path}", file=sys.stderr)
-        return None
 
 
 def set_tags_on_file(mp3_path: str, 
@@ -147,13 +163,14 @@ def set_tags_on_file(mp3_path: str,
                      total_tracks: Optional[int]):
     """Apply all tags to a single MP3 file."""
     try:
+        # Load with EasyID3 for text tags
         try:
             audio = MP3(mp3_path, ID3=EasyID3)
-        except error:
+        except ID3Error:
             audio = MP3(mp3_path)
             audio.add_tags()
 
-        # Author tags
+        # Apply text tags (EasyID3)
         if author_tags.get("artist"):
             audio["artist"] = author_tags["artist"]
         if author_tags.get("albumartist"):
@@ -161,7 +178,6 @@ def set_tags_on_file(mp3_path: str,
         if author_tags.get("copyright"):
             audio["copyright"] = author_tags["copyright"]
 
-        # Album tags
         if album_tags.get("album"):
             audio["album"] = album_tags["album"]
         if album_tags.get("albumartist"):
@@ -171,12 +187,10 @@ def set_tags_on_file(mp3_path: str,
         if album_tags.get("genre"):
             audio["genre"] = album_tags["genre"]
 
-        # Total tracks
         if total_tracks:
             track_num = song_tags.get("tracknumber") or "1"
             audio["tracknumber"] = f"{track_num}/{total_tracks}"
 
-        # Song-specific tags (override)
         for key, value in song_tags.items():
             if value:
                 if key == "tracknumber" and total_tracks:
@@ -184,7 +198,7 @@ def set_tags_on_file(mp3_path: str,
                 else:
                     audio[key] = str(value)
 
-        # Album artwork
+        # === Album Artwork Handling (Fixed) ===
         if albumart_path and os.path.isfile(albumart_path):
             with open(albumart_path, "rb") as img:
                 img_data = img.read()
@@ -192,10 +206,15 @@ def set_tags_on_file(mp3_path: str,
             ext = Path(albumart_path).suffix.lower()
             mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
 
-            if hasattr(audio, 'tags') and audio.tags:
-                audio.tags.delall("APIC")
+            # Switch to full ID3 to safely delete existing APIC frames
+            full_tags = MP3(mp3_path).tags
+            if full_tags is None:
+                full_tags = ID3()
+                audio.tags = full_tags  # ensure we have tags
 
-            audio.tags.add(
+            full_tags.delall("APIC")   # This is the fix — delall only works on full ID3
+
+            full_tags.add(
                 APIC(
                     encoding=3,
                     mime=mime,
@@ -204,6 +223,10 @@ def set_tags_on_file(mp3_path: str,
                     data=img_data
                 )
             )
+
+            # Copy the updated tags back if needed
+            if hasattr(audio, 'tags'):
+                audio.tags = full_tags
 
         audio.save()
         return True
@@ -227,7 +250,6 @@ def main():
     author_tags = load_json_file(args.author)
     albumart_dir = args.albumart
 
-    # Find MP3 files
     input_path = Path(args.input)
     if input_path.is_file() and str(input_path).lower().endswith(".mp3"):
         mp3_files = [str(input_path)]
@@ -247,12 +269,13 @@ def main():
 
     for mp3_file in mp3_files:
         mp3_name = Path(mp3_file).name
+        print(f"Processing {mp3_name}...")
+
         song_tags = {}
         album_tags = {}
         album_tags_dir = str(Path(mp3_file).parent)
         tags_used = False
 
-        # === 1. Load song-level tags ===
         if args.tags:
             song_tags = load_json_file(args.tags)
             print(f"Using provided song tags file: {Path(args.tags).name}")
@@ -265,14 +288,11 @@ def main():
             elif args.verbose:
                 print(f"No song tags file found for {mp3_name}")
 
-        # === 2. Load album-level tags (with case-insensitive support) ===
         if args.albumtags:
-            # User explicitly provided --albumtags
             album_tags = load_json_file(args.albumtags)
             album_tags_dir = str(Path(args.albumtags).parent)
             print(f"Using provided album tags file: {Path(args.albumtags).name}")
         else:
-            # Auto-detect using enhanced priority + case-insensitive album name
             albumtags_path = find_albumtags_file(mp3_file, song_tags)
             if albumtags_path:
                 album_tags = load_json_file(albumtags_path)
@@ -280,20 +300,17 @@ def main():
             elif args.verbose:
                 print(f"No albumtags file found for {mp3_name}")
 
-        # Auto-detect track number from filename if missing
         if "tracknumber" not in song_tags:
             filename = Path(mp3_file).stem
             match = re.search(r'^0*(\d+)', filename)
             if match:
                 song_tags["tracknumber"] = match.group(1)
 
-        # Prepare album art and total tracks
         album_art_path = get_album_art_path(album_tags, albumart_dir, album_tags_dir)
         total_tracks = (album_tags.get("totaltracks") or 
                        album_tags.get("tracktotal") or 
                        album_tags.get("number_of_tracks"))
 
-        # === Tag the file ===
         if tags_used:
             if set_tags_on_file(
                 mp3_path=mp3_file,
