@@ -4,5 +4,5 @@
   "totaltracks": 12,
   "date": "2026",
   "genre": "Synthwave",
-  "albumart": "cover.jpg"          // relative to either --albumart path or --albumtags file
+  "albumart": "cover.jpg"          // (NOTE: remove this comment -- it's not valid JSON) relative to either --albumart path or --albumtags file
 }

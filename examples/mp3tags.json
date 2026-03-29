@@ -1,4 +1,5 @@
 {
+  "album": "My Awesome Album" // (NOTE: remove this comment -- it's not valid JSON) if set this can be used to search for the albumtags_<album name>.json when --albumtags isn't specified 
   "title": "Track Title Here",
   "genre": "Synthwave",
   "tracknumber": "1"
