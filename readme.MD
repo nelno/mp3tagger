@@ -14,9 +14,7 @@ Perfect for producers exporting from FL Studio (or any DAW) who want full contro
 - Automatically embeds album artwork (JPEG or PNG)
 - Handles track numbering intelligently (`"1/12"`, `"2/12"`, etc.)
 - Auto-detects albumtags.json and mp3tags.json files if not specified
-- Respects your rules for resolving album artwork paths
-- Lightweight and fast
-- Version 1.10
+- Flexible rules for resolving album and artwork paths
 
 ## Project Structure
 mp3tagger/
@@ -108,6 +106,70 @@ python mp3tagger.py --input "./My Album" \
                     --albumart "./art"
 ```
 
+## Workflow Example
+
+Here's a complete step-by-step workflow for tagging an album:
+
+### 1. Prepare Your Files
+Create a folder for your album, e.g., `My Awesome Album/`, and place all your MP3 files inside it.
+
+### 2. Create Author Tags
+Create `author.json` in your album folder or a parent folder:
+```json
+{
+  "artist": "Your Artist Name",
+  "albumartist": "Your Artist Name",
+  "copyright": "© 2026 Your Name"
+}
+```
+
+### 3. Create Album Tags
+Create `albumtags.json` in your album folder:
+```json
+{
+  "album": "My Awesome Album",
+  "albumartist": "Your Artist Name",
+  "totaltracks": 12,
+  "date": "2026",
+  "genre": "Synthwave",
+  "albumart": "cover.jpg"
+}
+```
+
+### 4. Create Song Tags (Per-Track Files)
+For more control, create individual JSON files for each track:
+- `01 - Intro.json`
+- `02 - Main Track.json`
+- etc.
+
+Example `01 - Intro.json`:
+```json
+{
+  "title": "Intro",
+  "tracknumber": "1",
+  "genre": "Synthwave"
+}
+```
+
+### 5. Add Album Artwork (Optional)
+Place your cover image (cover.jpg, cover.png, etc.) in an `art/` subfolder or alongside the JSON files.
+
+### 6. Run the Tagger
+```bash
+python mp3tagger.py --input "./My Awesome Album" --author "./author.json" --verbose
+```
+
+The script will:
+- Auto-detect `albumtags.json` and `mp3tags.json` (or per-track files)
+- Apply author, album, and song tags to each MP3
+- Embed album artwork
+- Show progress and only update files with changes
+
+### 7. Verify Results
+Check your MP3 files in a media player or use a tool like `ffprobe` to verify the metadata.
+
+In short, once you've set up the appropriate author.json, albumtags.json, mp3tags.json and .mp3 files in a hierarchy of folders (author.json can actually be anywhere, though), you can just run this script any time you change one of the tags or add a new .mp3. The script will change only updated tags in each .mp3, so if you change no tags and add a new .mp3, just that .mp3 will be updated.
+
 ### Album Artwork Path Rules
 
 If `--albumart` is provided → relative paths in albumtags.json are resolved against that folder.
@@ -122,7 +184,6 @@ Supports JPEG and PNG files. If no extension is specified in albumtags.json, tri
 
 ### Notes
 
-The script tries to auto-detect track numbers from filenames (e.g. `01 - Title.mp3` → track 1).
 Always test on a copy of your files first.
 Works with MP3 files only.
 Only updates files when tags or artwork have changed.
