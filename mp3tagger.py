@@ -354,12 +354,6 @@ def main():
             elif args.verbose:
                 print(f"No albumtags file found for {mp3_name}")
 
-        if "tracknumber" not in song_tags:
-            filename = Path(mp3_file).stem
-            match = re.search(r'^0*(\d+)', filename)
-            if match:
-                song_tags["tracknumber"] = match.group(1)
-
         album_art_path = get_album_art_path(album_tags, albumart_dir, album_tags_dir, args.verbose)
         total_tracks = (album_tags.get("totaltracks") or 
                        album_tags.get("tracktotal") or 
