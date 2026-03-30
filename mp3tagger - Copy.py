@@ -66,7 +66,7 @@ def find_files_case_insensitive(directory: Path, patterns: List[str]) -> Optiona
     return None
 
 
-def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_dir: str, verbose: bool = False) -> Optional[str]:
+def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_dir: str) -> Optional[str]:
     """Resolve album artwork path. Supports extension-less names (tries jpg/jpeg/png)."""
     if not album_tags.get("albumart"):
         return None
@@ -78,8 +78,6 @@ def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_
     if Path(art_rel).suffix:
         art_path = base / art_rel
         if art_path.is_file():
-            if verbose:
-                print(f"Found album art: {art_path.name}")
             return str(art_path)
         else:
             print(f"Warning: Album art not found at {art_path}", file=sys.stderr)
@@ -89,15 +87,14 @@ def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_
     for ext in [".jpg", ".jpeg", ".png"]:
         art_path = base / f"{art_rel}{ext}"
         if art_path.is_file():
-            if verbose:
-                print(f"Found album art: {art_path.name}")
+            print(f"Found album art: {art_path.name}")
             return str(art_path)
 
     print(f"Warning: Album art not found for '{art_rel}' (tried .jpg, .jpeg, .png)", file=sys.stderr)
     return None
 
 
-def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any], verbose: bool = False) -> Optional[str]:
+def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any]) -> Optional[str]:
     """Advanced case-insensitive auto-detection for albumtags files."""
     mp3_path = Path(mp3_path)
     mp3_folder = mp3_path.parent
@@ -123,8 +120,7 @@ def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any], verbose: bool 
 
     for cand in candidates:
         if cand.is_file():
-            if verbose:
-                print(f"Found album tags file: {cand.name}")
+            print(f"Found album tags file: {cand.name}")
             return str(cand)
 
     # Broader case-insensitive fallback
@@ -133,21 +129,19 @@ def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any], verbose: bool 
         for folder in [mp3_folder, parent_folder]:
             result = find_files_case_insensitive(folder, [f"albumtags_{album_lower}*.json", "albumtags_*.json"])
             if result:
-                if verbose:
-                    print(f"Found album tags file (case-insensitive): {result.name}")
+                print(f"Found album tags file (case-insensitive): {result.name}")
                 return str(result)
 
     for folder in [parent_folder, mp3_folder]:
         result = find_files_case_insensitive(folder, ["albumtags.json", "albumtags_*.json"])
         if result:
-            if verbose:
-                print(f"Found album tags file (case-insensitive): {result.name}")
+            print(f"Found album tags file (case-insensitive): {result.name}")
             return str(result)
 
     return None
 
 
-def find_tags_file(mp3_path: str, verbose: bool = False) -> Optional[str]:
+def find_tags_file(mp3_path: str) -> Optional[str]:
     """Auto-detect song-level tags file case-insensitively."""
     mp3_path = Path(mp3_path)
     folder = mp3_path.parent
@@ -156,8 +150,7 @@ def find_tags_file(mp3_path: str, verbose: bool = False) -> Optional[str]:
     patterns = [f"{stem}.json", f"mp3tags_{stem}.json", "mp3tags.json"]
     result = find_files_case_insensitive(folder, patterns)
     if result:
-        if verbose:
-            print(f"Found song tags file: {result.name}")
+        print(f"Found song tags file: {result.name}")
         return str(result)
     return None
 
@@ -217,68 +210,21 @@ def set_tags_on_file(mp3_path: str,
             except Exception:
                 pass
 
-        # === Album Artwork Change Detection ===
-        art_changed = False
-        new_art_data = None
-
-        if albumart_path and os.path.isfile(albumart_path):
-            with open(albumart_path, "rb") as img:
-                new_art_data = img.read()
-
-            # Load full ID3 to check existing APIC
-            full_tags = MP3(mp3_path).tags or ID3()
-            existing_apics = full_tags.getall("APIC")
-
-            # Look for cover (type 3) or any APIC
-            current_art_data = None
-            for apic in existing_apics:
-                if apic.type == 3 or not current_art_data:  # prefer COVER_FRONT
-                    current_art_data = apic.data
-                    break
-
-            if current_art_data != new_art_data:
-                art_changed = True
-
-        # Only proceed with save if text tags or artwork differ
-        if current_tags == new_tags and not art_changed:
-            print(f"No changes detected.")
-            return True, False   # (success, was_updated)
+        # Only proceed with save if text tags differ
+        if current_tags == new_tags:
+            print(f"– No changes needed for {Path(mp3_path).name}")
+            return True
 
         # Apply text tags
         for key, value in new_tags.items():
             audio[key] = value
 
-        # Apply album artwork if we have new data
-        if new_art_data:
-            ext = Path(albumart_path).suffix.lower()
-            mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
-
-            full_tags = MP3(mp3_path).tags
-            if full_tags is None:
-                full_tags = ID3()
-                audio.tags = full_tags
-
-            full_tags.delall("APIC")
-
-            full_tags.add(
-                APIC(
-                    encoding=3,
-                    mime=mime,
-                    type=3,
-                    desc="Cover",
-                    data=new_art_data
-                )
-            )
-
-            if hasattr(audio, 'tags'):
-                audio.tags = full_tags
-
         audio.save()
-        return True, True   # (success, was_updated)
+        return True
 
     except Exception as e:
         print(f"✗ Error tagging {Path(mp3_path).name}: {e}", file=sys.stderr)
-        return False, False
+        return False
 
 
 def main():
@@ -309,11 +255,8 @@ def main():
 
     print(f"Found {len(mp3_files)} MP3 file(s) to tag.\n")
 
-    processed_count = 0
-    updated_count = 0
-    nochange_count = 0
-    skipped_tags_count = 0
-    error_count = 0
+    success_count = 0
+    skipped_count = 0
 
     for mp3_file in mp3_files:
         mp3_name = Path(mp3_file).name
@@ -326,15 +269,12 @@ def main():
 
         if args.tags:
             song_tags = load_json_file(args.tags)
-            if args.verbose:
-                print(f"Using provided song tags file: {Path(args.tags).name}")
+            print(f"Using provided song tags file: {Path(args.tags).name}")
             tags_used = True
         else:
-            tags_path = find_tags_file(mp3_file, args.verbose)
+            tags_path = find_tags_file(mp3_file)
             if tags_path:
                 song_tags = load_json_file(tags_path)
-                if args.verbose:
-                    print(f"Found song tags file: {Path(tags_path).name}")
                 tags_used = True
             elif args.verbose:
                 print(f"No song tags file found for {mp3_name}")
@@ -342,15 +282,12 @@ def main():
         if args.albumtags:
             album_tags = load_json_file(args.albumtags)
             album_tags_dir = str(Path(args.albumtags).parent)
-            if args.verbose:
-                print(f"Using provided album tags file: {Path(args.albumtags).name}")
+            print(f"Using provided album tags file: {Path(args.albumtags).name}")
         else:
-            albumtags_path = find_albumtags_file(mp3_file, song_tags, args.verbose)
+            albumtags_path = find_albumtags_file(mp3_file, song_tags)
             if albumtags_path:
                 album_tags = load_json_file(albumtags_path)
                 album_tags_dir = str(Path(albumtags_path).parent)
-                if args.verbose:
-                    print(f"Found album tags file: {Path(albumtags_path).name}")
             elif args.verbose:
                 print(f"No albumtags file found for {mp3_name}")
 
@@ -360,40 +297,29 @@ def main():
             if match:
                 song_tags["tracknumber"] = match.group(1)
 
-        album_art_path = get_album_art_path(album_tags, albumart_dir, album_tags_dir, args.verbose)
+        album_art_path = get_album_art_path(album_tags, albumart_dir, album_tags_dir)
         total_tracks = (album_tags.get("totaltracks") or 
                        album_tags.get("tracktotal") or 
                        album_tags.get("number_of_tracks"))
 
         if tags_used:
-            processed_count += 1
-            success, was_updated = set_tags_on_file(
+            if set_tags_on_file(
                 mp3_path=mp3_file,
                 author_tags=author_tags,
                 album_tags=album_tags,
                 song_tags=song_tags,
                 albumart_path=album_art_path,
                 total_tracks=total_tracks
-            )
-            if success:
-                if was_updated:
-                    print(f"✓ Tagged: {mp3_name}")
-                    updated_count += 1
-                else:
-                    nochange_count += 1
-            else:
-                error_count += 1
+            ):
+                print(f"✓ Tagged: {mp3_name}")
+                success_count += 1
         else:
             print(f"– Skipped: {mp3_name} (no song tags file found)")
-            skipped_tags_count += 1
+            skipped_count += 1
 
-    print(f"\nTagging complete!")
-    print(f"Processed: {processed_count} MP3(s)")
-    print(f"Updated: {updated_count} MP3(s)")
-    print(f"Skipped (no changes): {nochange_count} MP3(s)")
-    print(f"Skipped (no song tags): {skipped_tags_count} MP3(s)")
-    if error_count:
-        print(f"Skipped due to errors: {error_count} MP3(s)")
+    print(f"\nTagging complete! Successfully tagged {success_count} file(s).")
+    if skipped_count:
+        print(f"Skipped {skipped_count} file(s) due to missing song tags files.")
 
 
 if __name__ == "__main__":
