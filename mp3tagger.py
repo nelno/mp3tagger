@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import mutagen.id3
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -19,7 +20,7 @@ from mutagen.easyid3 import EasyID3
 
 # Versioning constants
 VERSION_HIGH = 1
-VERSION_LOW = 10
+VERSION_LOW = 11  # bumped for the new --debug feature
 
 def load_json_file(file_path: str) -> Dict[str, Any]:
     """Load and parse a JSON file. Returns empty dict if file doesn't exist or fails."""
@@ -74,7 +75,6 @@ def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_
     art_rel = album_tags["albumart"].strip()
     base = Path(albumart_dir) if albumart_dir else Path(tags_file_dir)
 
-    # If it already has an extension, use it directly
     if Path(art_rel).suffix:
         art_path = base / art_rel
         if art_path.is_file():
@@ -85,7 +85,6 @@ def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_
             print(f"Warning: Album art not found at {art_path}", file=sys.stderr)
             return None
 
-    # No extension → try .jpg, .jpeg, .png (in that order)
     for ext in [".jpg", ".jpeg", ".png"]:
         art_path = base / f"{art_rel}{ext}"
         if art_path.is_file():
@@ -97,7 +96,7 @@ def get_album_art_path(album_tags: Dict, albumart_dir: Optional[str], tags_file_
     return None
 
 
-def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any], verbose: bool = False) -> Optional[str]:
+def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any], verbose: bool = False, debug: bool = False) -> Optional[str]:
     """Advanced case-insensitive auto-detection for albumtags files."""
     mp3_path = Path(mp3_path)
     mp3_folder = mp3_path.parent
@@ -123,8 +122,8 @@ def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any], verbose: bool 
 
     for cand in candidates:
         if cand.is_file():
-            if verbose:
-                print(f"Found album tags file: {cand.name}")
+            if debug or verbose:
+                print(f"DEBUG: Found album tags file: {cand}")
             return str(cand)
 
     # Broader case-insensitive fallback
@@ -133,17 +132,19 @@ def find_albumtags_file(mp3_path: str, song_tags: Dict[str, Any], verbose: bool 
         for folder in [mp3_folder, parent_folder]:
             result = find_files_case_insensitive(folder, [f"albumtags_{album_lower}*.json", "albumtags_*.json"])
             if result:
-                if verbose:
-                    print(f"Found album tags file (case-insensitive): {result.name}")
+                if debug or verbose:
+                    print(f"DEBUG: Found album tags file (case-insensitive): {result}")
                 return str(result)
 
     for folder in [parent_folder, mp3_folder]:
         result = find_files_case_insensitive(folder, ["albumtags.json", "albumtags_*.json"])
         if result:
-            if verbose:
-                print(f"Found album tags file (case-insensitive): {result.name}")
+            if debug or verbose:
+                print(f"DEBUG: Found album tags file (case-insensitive): {result}")
             return str(result)
 
+    if debug:
+        print(f"DEBUG: No albumtags file found for {mp3_path.name}")
     return None
 
 
@@ -167,30 +168,29 @@ def set_tags_on_file(mp3_path: str,
                      album_tags: Dict, 
                      song_tags: Dict, 
                      albumart_path: Optional[str],
-                     total_tracks: Optional[int]):
-    """Apply all tags to a single MP3 file."""
+                     total_tracks: Optional[int],
+                     debug: bool = False):
+    """Apply all tags using full ID3 for reliability while preserving original change detection."""
     try:
-        # Load with EasyID3 for text tags
+        # Load with EasyID3 for easy text tag handling, but we'll switch to full ID3 for writing
         try:
             audio = MP3(mp3_path, ID3=EasyID3)
         except ID3Error:
             audio = MP3(mp3_path)
             audio.add_tags()
 
-        # Build the intended new tags (text tags only)
+        # Build the intended new text tags (same logic as before)
         new_tags: Dict[str, str] = {}
 
         if author_tags.get("artist"):
             new_tags["artist"] = author_tags["artist"]
-        if author_tags.get("albumartist"):
-            new_tags["albumartist"] = author_tags.get("albumartist") or author_tags.get("artist")
+        if author_tags.get("albumartist") or album_tags.get("albumartist"):
+            new_tags["albumartist"] = album_tags.get("albumartist") or author_tags.get("albumartist") or author_tags.get("artist")
         if author_tags.get("copyright"):
             new_tags["copyright"] = author_tags["copyright"]
 
         if album_tags.get("album"):
             new_tags["album"] = album_tags["album"]
-        if album_tags.get("albumartist"):
-            new_tags["albumartist"] = album_tags["albumartist"]
         if album_tags.get("date") or album_tags.get("year"):
             new_tags["date"] = album_tags.get("date") or album_tags.get("year")
         if album_tags.get("genre"):
@@ -207,7 +207,14 @@ def set_tags_on_file(mp3_path: str,
                 else:
                     new_tags[key] = str(value)
 
-        # Get current text tags for comparison (ignore album art)
+        if debug:
+            print("DEBUG: Tags that will be set:")
+            for k, v in sorted(new_tags.items()):
+                print(f"   {k:15} = {v}")
+            if albumart_path:
+                print(f"   album art      = {Path(albumart_path).name} (will be embedded)")
+
+        # Get current text tags for comparison
         current_tags = {}
         for key in new_tags.keys():
             try:
@@ -217,7 +224,7 @@ def set_tags_on_file(mp3_path: str,
             except Exception:
                 pass
 
-        # === Album Artwork Change Detection ===
+        # === Album Artwork Change Detection (unchanged from original) ===
         art_changed = False
         new_art_data = None
 
@@ -229,7 +236,6 @@ def set_tags_on_file(mp3_path: str,
             full_tags = MP3(mp3_path).tags or ID3()
             existing_apics = full_tags.getall("APIC")
 
-            # Look for cover (type 3) or any APIC
             current_art_data = None
             for apic in existing_apics:
                 if apic.type == 3 or not current_art_data:  # prefer COVER_FRONT
@@ -238,28 +244,53 @@ def set_tags_on_file(mp3_path: str,
 
             if current_art_data != new_art_data:
                 art_changed = True
+                if debug:
+                    print("DEBUG: Album art will be updated (different from current)")
 
         # Only proceed with save if text tags or artwork differ
         if current_tags == new_tags and not art_changed:
+            if debug:
+                print("DEBUG: No changes detected - skipping write")
             print(f"No changes detected.")
             return True, False   # (success, was_updated)
 
-        # Apply text tags
-        for key, value in new_tags.items():
-            audio[key] = value
+        if debug:
+            print("DEBUG: Changes detected - applying tags...")
 
-        # Apply album artwork if we have new data
+        # === CRITICAL FIX: Use full ID3 to actually write the tags reliably ===
+        full_tags = MP3(mp3_path).tags
+        if full_tags is None:
+            full_tags = ID3()
+            audio.tags = full_tags
+
+        # Clear old frames we care about
+        for frame in ["TPE1", "TPE2", "TALB", "TCON", "TDRC", "TRCK", "TCOP", "TIT2"]:
+            full_tags.delall(frame)
+
+        # Write text tags using proper ID3 frames
+        if "artist" in new_tags:
+            full_tags.add(mutagen.id3.TPE1(encoding=3, text=new_tags["artist"]))
+        if "albumartist" in new_tags:
+            full_tags.add(mutagen.id3.TPE2(encoding=3, text=new_tags["albumartist"]))
+        if "copyright" in new_tags:
+            full_tags.add(mutagen.id3.TCOP(encoding=3, text=new_tags["copyright"]))
+        if "album" in new_tags:
+            full_tags.add(mutagen.id3.TALB(encoding=3, text=new_tags["album"]))
+        if "date" in new_tags:
+            full_tags.add(mutagen.id3.TDRC(encoding=3, text=new_tags["date"]))
+        if "genre" in new_tags:
+            full_tags.add(mutagen.id3.TCON(encoding=3, text=new_tags["genre"]))
+        if "tracknumber" in new_tags:
+            full_tags.add(mutagen.id3.TRCK(encoding=3, text=new_tags["tracknumber"]))
+        if "title" in new_tags:
+            full_tags.add(mutagen.id3.TIT2(encoding=3, text=new_tags["title"]))
+
+        # Apply album artwork if needed
         if new_art_data:
             ext = Path(albumart_path).suffix.lower()
             mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
 
-            full_tags = MP3(mp3_path).tags
-            if full_tags is None:
-                full_tags = ID3()
-                audio.tags = full_tags
-
             full_tags.delall("APIC")
-
             full_tags.add(
                 APIC(
                     encoding=3,
@@ -270,16 +301,13 @@ def set_tags_on_file(mp3_path: str,
                 )
             )
 
-            if hasattr(audio, 'tags'):
-                audio.tags = full_tags
-
+        audio.tags = full_tags
         audio.save()
         return True, True   # (success, was_updated)
 
     except Exception as e:
         print(f"✗ Error tagging {Path(mp3_path).name}: {e}", file=sys.stderr)
         return False, False
-
 
 def main():
     parser = argparse.ArgumentParser(description="MP3 Batch Tagger")
@@ -289,6 +317,7 @@ def main():
     parser.add_argument("--tags", help="Path to song-level JSON tags file (optional - auto-detected if omitted)")
     parser.add_argument("--author", required=True, help="Path to author JSON file")
     parser.add_argument("--verbose", action="store_true", help="Show messages for files without tags file")
+    parser.add_argument("--debug", action="store_true", help="Print detailed debug information (album tags location and exact tags set)")
 
     args = parser.parse_args()
 
@@ -326,35 +355,35 @@ def main():
 
         if args.tags:
             song_tags = load_json_file(args.tags)
-            if args.verbose:
+            if args.verbose or args.debug:
                 print(f"Using provided song tags file: {Path(args.tags).name}")
             tags_used = True
         else:
             tags_path = find_tags_file(mp3_file, args.verbose)
             if tags_path:
                 song_tags = load_json_file(tags_path)
-                if args.verbose:
+                if args.verbose or args.debug:
                     print(f"Found song tags file: {Path(tags_path).name}")
                 tags_used = True
-            elif args.verbose:
+            elif args.verbose or args.debug:
                 print(f"No song tags file found for {mp3_name}")
 
         if args.albumtags:
             album_tags = load_json_file(args.albumtags)
             album_tags_dir = str(Path(args.albumtags).parent)
-            if args.verbose:
-                print(f"Using provided album tags file: {Path(args.albumtags).name}")
+            if args.debug:
+                print(f"DEBUG: Using provided album tags file: {Path(args.albumtags)}")
         else:
-            albumtags_path = find_albumtags_file(mp3_file, song_tags, args.verbose)
+            albumtags_path = find_albumtags_file(mp3_file, song_tags, args.verbose, args.debug)
             if albumtags_path:
                 album_tags = load_json_file(albumtags_path)
                 album_tags_dir = str(Path(albumtags_path).parent)
-                if args.verbose:
-                    print(f"Found album tags file: {Path(albumtags_path).name}")
-            elif args.verbose:
-                print(f"No albumtags file found for {mp3_name}")
+                if args.debug:
+                    print(f"DEBUG: Loaded album tags from: {albumtags_path}")
+            elif args.debug:
+                print(f"DEBUG: No albumtags file found for {mp3_name}")
 
-        album_art_path = get_album_art_path(album_tags, albumart_dir, album_tags_dir, args.verbose)
+        album_art_path = get_album_art_path(album_tags, albumart_dir, album_tags_dir, args.verbose or args.debug)
         total_tracks = (album_tags.get("totaltracks") or 
                        album_tags.get("tracktotal") or 
                        album_tags.get("number_of_tracks"))
@@ -367,7 +396,8 @@ def main():
                 album_tags=album_tags,
                 song_tags=song_tags,
                 albumart_path=album_art_path,
-                total_tracks=total_tracks
+                total_tracks=total_tracks,
+                debug=args.debug
             )
             if success:
                 if was_updated:
